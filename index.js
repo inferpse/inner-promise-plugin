@@ -14,8 +14,6 @@ InnerPromisePlugin.prototype.apply = function(compiler) {
   var jsregex = options.test || /\.js($|\?)/i;
   var modulePath = path.resolve(cwd, options.modulePath);
 
-  console.log('compare: ', modulePath);
-
   compiler.plugin('compilation', function (compilation) {
     compilation.plugin('optimize-chunk-assets', function (chunks, callback) {
       var moduleId = null;
