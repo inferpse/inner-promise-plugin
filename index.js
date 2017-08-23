@@ -1,153 +1,64 @@
-const { SourceMapSource, RawSource } = require('webpack-sources'),
-      babel = require('babel-core'),
+const { ConcatSource } = require('webpack-sources'),
       path = require('path'),
       cwd = process.cwd();
 
 class InnerPromisePlugin {
   constructor(options) {
     this.options = Object.assign({
-      jsregex: /\.js($|\?)/i,
       modulePath: '',
       moduleAccessor: ''
     }, options);
   }
-  apply(compiler) {
-    const { options } = this,
-          { jsregex } = options,
-          modulePath = path.resolve(cwd, options.modulePath),
-          useSourceMap = typeof options.sourceMap === 'undefined' ? !!compiler.options.devtool : options.sourceMap;
+  getPromiseModuleId(compilation) {
+    // find id of the module which contains local Promise implementation
+    let modulePath = path.resolve(cwd, this.options.modulePath),
+        moduleId = null;
 
-    compiler.plugin('compilation', function (compilation) {
-
-      if (useSourceMap) {
-        compilation.plugin('build-module', function (module) {
-          module.useSourceMap = true;
-        });
-      }
-
-      compilation.plugin('optimize-chunk-assets', function (chunks, callback) {
-        let files = [],
-            moduleId = null;
-
-        chunks.forEach(chunk => {
-          // find local module with Promise implementation
-          chunk.forEachModule(function(module) {
-            if (module.fileDependencies && moduleId === null) {
-              module.fileDependencies.forEach(function(filePath) {
-                if (moduleId === null && filePath === modulePath) {
-                  moduleId = module.id;
-                }
-              });
-            }
-          });
-
-          chunk.files.forEach(file => files.push(file));
-        });
-
-        compilation.additionalChunkAssets.forEach(file => files.push(file));
-
-        // do nothing if we were unable to find local promise implementation
-        if (moduleId === null) {
-          compilation.errors.push(new Error('InnerPromisePlugin: module with promise implementation not found!'));
-          callback();
-          return;
-        }
-
-        // save reference to module id in options
-        options.moduleId = moduleId;
-
-        files.filter(file => jsregex.test(file)).forEach(file => {
-          try {
-            let asset = compilation.assets[file];
-
-            // use cached asset
-            if (asset.__innerPromiseApplied) {
-              compilation.assets[file] = asset.__innerPromiseApplied;
-              return;
-            }
-
-            // read options
-            let input, inputSourceMap;
-            if (useSourceMap) {
-              if (asset.sourceAndMap) {
-                let sourceAndMap = asset.sourceAndMap();
-                inputSourceMap = sourceAndMap.map;
-                input = sourceAndMap.source;
-              } else {
-                inputSourceMap = asset.map();
-                input = asset.source();
-              }
-            } else {
-              input = asset.source();
-            }
-
-            // apply transformation
-            const result = babel.transform(input, {
-              plugins: [
-                [InjectLocalPromise, options]
-              ],
-              sourceMaps: useSourceMap,
-              compact: false,
-              babelrc: false,
-              inputSourceMap
-            });
-
-            // save result
-            asset.__innerPromiseApplied = compilation.assets[file] = (
-              result.map
-              ? new SourceMapSource(result.code, file, result.map, input, inputSourceMap)
-              : new RawSource(result.code)
-            );
-          } catch (e) {
-            compilation.errors.push(e);
+    compilation.modules.forEach(module => {
+      if (module.fileDependencies && moduleId === null) {
+        module.fileDependencies.forEach(function(filePath) {
+          if (moduleId === null && filePath === modulePath) {
+            moduleId = module.id;
           }
         });
-
-        callback();
-      })
-    });
-  }
-}
-
-const InjectLocalPromise = ({types: t}) => {
-  return {
-    visitor: {
-      Identifier: (path, {opts: options}) => {
-        const { node, scope } = path;
-        if (isWebpackInternalPromise(path)) {
-          replacePromiseIdentifier(path, options);
-        }
       }
-    }
-  };
-
-  function isWebpackInternalPromise(path) {
-    const { node, parentPath } = path;
-    if (node.name === 'Promise') {
-      const parentFunc = getParentFunction(path),
-            parentNode = parentFunc && parentFunc.node;
-      return parentFunc && (
-        (parentNode.type === 'FunctionDeclaration' && parentNode.id && parentNode.id.name === 'webpackAsyncContext')
-        ||
-        (parentNode.type === 'FunctionExpression' && parentNode.id && parentNode.id.name === 'requireEnsure')
-      )
-    }
-  }
-
-  function getParentFunction(path) {
-    return path.findParent(path => {
-      return path.isFunctionExpression() || path.isFunctionDeclaration();
     });
+    return moduleId;
   }
+  getPromiseInclude(moduleId) {
+    const moduleAccessor = this.options.moduleAccessor || '';
+    return moduleId !== null ? `var Promise = __webpack_require__(${moduleId})${moduleAccessor};` : '';
+  }
+  apply(compiler) {
+    const self = this;
 
-  function replacePromiseIdentifier(path, options) {
-    let replacement = t.callExpression(t.identifier('__webpack_require__'), [t.numericLiteral(options.moduleId)]);
+    compiler.plugin('compilation', compilation => {
+      compilation.mainTemplate.plugin('require-ensure', function(source) {
+        const moduleId = self.getPromiseModuleId(compilation);
 
-    if (options.moduleAccessor) {
-      replacement = t.memberExpression(replacement, t.identifier(options.moduleAccessor))
-    }
+        // define local "Promise" variable in webpack internal functions
+        return this.asString([
+          self.getPromiseInclude(moduleId),
+          source,
+        ]);
+      });
 
-    path.replaceWith(replacement);
+      compilation.moduleTemplate.plugin('module', moduleSource => {
+        if (moduleSource.source().indexOf('webpackAsyncContext') > -1) {          
+          const moduleId = self.getPromiseModuleId(compilation),
+                newSource = new ConcatSource();
+
+          // define local "Promise" variable in webpack internal functions
+          newSource.add(self.getPromiseInclude(moduleId));
+          newSource.add('\n');
+          newSource.add(moduleSource);
+          return newSource;
+        } else {
+          return moduleSource;
+        }
+      });
+
+    });
   }
 }
 
