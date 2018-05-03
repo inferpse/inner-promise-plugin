@@ -1,6 +1,6 @@
 {
   "name": "inner-promise-plugin",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "force webpack to load promise implementation from the bundle source",
   "main": "index.js",
   "scripts": {

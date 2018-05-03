@@ -1,6 +1,4 @@
-const { ConcatSource } = require('webpack-sources'),
-      path = require('path'),
-      cwd = process.cwd();
+const { ConcatSource } = require('webpack-sources');
 
 class InnerPromisePlugin {
   constructor(options) {
@@ -11,50 +9,44 @@ class InnerPromisePlugin {
   }
   getPromiseModuleId(compilation) {
     // find id of the module which contains local Promise implementation
-    let modulePath = path.resolve(cwd, this.options.modulePath),
-        moduleId = null;
-
-    compilation.modules.forEach(module => {
-      if (module.fileDependencies && moduleId === null) {
-        module.fileDependencies.forEach(function(filePath) {
-          if (moduleId === null && filePath === modulePath) {
-            moduleId = module.id;
-          }
-        });
+    let moduleId = null;
+    for (let i = 0; i < compilation.modules.length; i++) {
+      const module = compilation.modules[i];
+      if (module.resource === this.options.modulePath) {
+        moduleId = module.id;
+        break;
       }
-    });
+    }
     return moduleId;
   }
   getPromiseInclude(moduleId) {
     const moduleAccessor = this.options.moduleAccessor || '';
-    return moduleId !== null ? `var Promise = __webpack_require__(${moduleId})${moduleAccessor};` : '';
+    return moduleId !== null ? `var Promise = __webpack_require__('${moduleId}')${moduleAccessor};` : '';
   }
   apply(compiler) {
-    const self = this;
+    compiler.hooks.compilation.tap('InnerPromisePlugin', compilation => {
 
-    compiler.plugin('compilation', compilation => {
-      compilation.mainTemplate.plugin('require-ensure', function(source) {
-        const moduleId = self.getPromiseModuleId(compilation);
-
-        // define local "Promise" variable in webpack internal functions
-        return this.asString([
-          self.getPromiseInclude(moduleId),
+      // define local "Promise" variable in webpack main template
+      compilation.mainTemplate.hooks.requireEnsure.tap('InnerPromisePlugin', source => {
+        const moduleId = this.getPromiseModuleId(compilation);
+        return [
+          this.getPromiseInclude(moduleId),
           source,
-        ]);
+        ].join('\n');
       });
 
-      compilation.moduleTemplate.plugin('module', moduleSource => {
-        if (moduleSource.source().indexOf('webpackAsyncContext') > -1) {          
-          const moduleId = self.getPromiseModuleId(compilation),
+      // define local "Promise" variable for wild-card chunk loading
+      compilation.moduleTemplates.javascript.hooks.module.tap('InnerPromisePlugin', source => {
+        if (source.source().indexOf('webpackAsyncContext') > -1) {
+          const moduleId = this.getPromiseModuleId(compilation),
                 newSource = new ConcatSource();
 
-          // define local "Promise" variable in webpack internal functions
-          newSource.add(self.getPromiseInclude(moduleId));
+          newSource.add(this.getPromiseInclude(moduleId));
           newSource.add('\n');
-          newSource.add(moduleSource);
+          newSource.add(source);
           return newSource;
         } else {
-          return moduleSource;
+          return source;
         }
       });
 
