@@ -1,4 +1,6 @@
-const { ConcatSource } = require('webpack-sources');
+const webpack = require('webpack');
+const { JavascriptModulesPlugin } = webpack.javascript;
+const { ConcatSource, ReplaceSource } = require('webpack-sources');
 
 class InnerPromisePlugin {
   constructor(options) {
@@ -7,51 +9,59 @@ class InnerPromisePlugin {
       moduleAccessor: ''
     }, options);
   }
-  getPromiseModuleId(compilation) {
-    // find id of the module which contains local Promise implementation
-    let moduleId = null;
-    for (let i = 0; i < compilation.modules.length; i++) {
-      const module = compilation.modules[i];
-      if (module.resource === this.options.modulePath) {
-        moduleId = module.id;
-        break;
-      }
-    }
-    return moduleId;
-  }
-  getPromiseInclude(moduleId) {
-    const moduleAccessor = this.options.moduleAccessor || '';
-    return moduleId !== null ? `var Promise = __webpack_require__('${moduleId}')${moduleAccessor};` : '';
-  }
+
   apply(compiler) {
     compiler.hooks.compilation.tap('InnerPromisePlugin', compilation => {
 
-      // define local "Promise" variable in webpack main template
-      compilation.mainTemplate.hooks.requireEnsure.tap('InnerPromisePlugin', source => {
-        const moduleId = this.getPromiseModuleId(compilation);
-        return [
-          this.getPromiseInclude(moduleId),
-          source,
-        ].join('\n');
+      // define local "Promise" variable in webpack bootstrap template
+      JavascriptModulesPlugin.getCompilationHooks(compilation).renderMain.tap('JSONPNamespacePlugin', source => {
+        const moduleId = getPromiseModuleId(compilation, this.options.modulePath);
+        const promiseInclude = getPromiseInclude(moduleId, this.options.moduleAccessor);
+
+        const fullModuleSource = source.source();
+        const injectAfter = [
+          '__webpack_require__.e = function(chunkId) {',
+          '__webpack_require__.f.j = function(chunkId, promises) {',
+        ];
+
+        source = new ReplaceSource(source);
+        injectAfter.forEach(expectedTemplate => {
+          const matchIndex = fullModuleSource.indexOf(expectedTemplate);
+          if (matchIndex > -1) {
+            source.insert(matchIndex + expectedTemplate.length, promiseInclude);
+          }
+        });
+        return source;
       });
 
       // define local "Promise" variable for wild-card chunk loading
-      compilation.moduleTemplates.javascript.hooks.module.tap('InnerPromisePlugin', source => {
-        if (source.source().indexOf('webpackAsyncContext') > -1) {
-          const moduleId = this.getPromiseModuleId(compilation),
-                newSource = new ConcatSource();
-
-          newSource.add(this.getPromiseInclude(moduleId));
-          newSource.add('\n');
-          newSource.add(source);
-          return newSource;
-        } else {
-          return source;
+      JavascriptModulesPlugin.getCompilationHooks(compilation).renderModuleContent.tap('InnerPromisePlugin', source => {
+        if (source.source().includes('webpackAsyncContext')) {
+          const moduleId = getPromiseModuleId(compilation, this.options.modulePath);
+          source = new ConcatSource(getPromiseInclude(moduleId, this.options.moduleAccessor), '\n', source);
         }
+        return source;
       });
 
     });
   }
+}
+
+const getPromiseModuleId = (compilation, promiseModulePath) => {
+  // find id of the module which contains local Promise implementation
+  let moduleId = null;
+  compilation.chunks.forEach(chunk => {
+    compilation.chunkGraph.getChunkModules(chunk).forEach(module => {
+      if (moduleId === null && module.resource === promiseModulePath) {
+        moduleId = compilation.chunkGraph.getModuleId(module);
+      }
+    });
+  });
+  return moduleId;
+}
+
+const getPromiseInclude = (moduleId, moduleAccessor) => {
+  return moduleId !== null ? `var Promise = __webpack_require__(${JSON.stringify(moduleId)})${moduleAccessor || ''};` : '';
 }
 
 module.exports = InnerPromisePlugin;
